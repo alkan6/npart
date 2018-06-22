@@ -8,10 +8,11 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/io.hpp>
 
-enum {PRG_CUBE,PRG_COMPUTE,PRG_PARTICLE,PRG_COUNT};
-enum {VAO_CUBE,VAO_COMPUTE,VAO_PARTICLE,VAO_COUNT};
-enum {VBO_CUBE,VBO_COMPUTE,VBO_PARTICLE,VBO_COUNT};
-enum {EBO_CUBE,EBO_COUNT};
+enum {PRG_CUBE, PRG_COMPUTE, PRG_PARTICLE, PRG_COUNT};
+enum {VAO_CUBE, VAO_COMPUTE, VAO_PARTICLE0, VAO_PARTICLE1, VAO_COUNT};
+enum {VBO_CUBE, VBO_COMPUTE, VBO_PARTICLE0, VBO_PARTICLE1, VBO_COUNT};
+enum {EBO_CUBE, EBO_COUNT};
+enum {XFB_PARTICLE, XFB_COUNT};
 
 static const GLchar * cubeVertShader =
         "#version 420 core\n"
@@ -38,9 +39,26 @@ static const GLchar * partCompShader =
 static const GLchar * partVertShader =
         "#version 420 core\n"
         "in vec4 partPos;"
+        "out vec4 pos;"
         "uniform mat4 mvpMat;"
         "void main(){"
+        "  pos = partPos;"
         "  gl_Position = mvpMat * partPos;"
+        "}";
+
+static const GLchar * partGeomShader =
+        "#version 420 core\n"
+        "layout (points) in;"
+        "layout (points, max_vertices=1) out;"
+        "in vec4 pos[];"
+        "out vec4 partPosNext;"
+        "uniform samplerBuffer geom;"
+        "void main(){"
+        "  partPosNext = pos[0];"
+        ""
+        "  gl_Position = gl_in[0].gl_Position;"
+        "  EmitVertex();"
+        "  EndPrimitive();"
         "}";
 
 static const GLchar * partFragShader =
@@ -78,6 +96,9 @@ typedef struct {
     GLuint vao[VAO_COUNT];//vertex array
     GLuint vbo[VBO_COUNT];//vertex buffer
     GLuint ebo[EBO_COUNT];//element buffer
+    GLuint xfb[XFB_COUNT];//Transform feedback
+    GLuint popCount;
+    GLuint frame;
 } UserData;
 
 void onGLFWError(int, const char * msg)
@@ -274,16 +295,21 @@ void initPartUpdater(UserData *d)
     glBindBuffer(GL_ARRAY_BUFFER,0);
     glUseProgram(0);
 }
+
 void initPartRenderer(UserData *d)
 {
     GLuint prg = loadShaders(
-    {GL_VERTEX_SHADER,GL_FRAGMENT_SHADER},
-    {partVertShader, partFragShader});
+    {GL_VERTEX_SHADER,GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER},
+    {partVertShader, partGeomShader, partFragShader},
+    {"partPosNext"});
     if(!prg) exit(-1);
     d->prg[PRG_PARTICLE] = prg;
 
-    GLuint vao = d->vao[VAO_PARTICLE];
-    GLuint vbo = d->vbo[VBO_PARTICLE];
+    GLuint vao0 = d->vao[VAO_PARTICLE0];
+    GLuint vao1 = d->vao[VAO_PARTICLE1];
+    GLuint vbo0 = d->vbo[VBO_PARTICLE0];
+    GLuint vbo1 = d->vbo[VBO_PARTICLE1];
+    GLuint xfb = d->xfb[XFB_PARTICLE];
 
     glUseProgram(prg);
 
@@ -291,22 +317,63 @@ void initPartRenderer(UserData *d)
     GLint partPosLoc = glGetAttribLocation(prg,"partPos");
     if(partPosLoc<0) exit(-1);
 
-    glBindVertexArray(vao);
+    glBindVertexArray(vao0);
+    //initial particles
+    glBindBuffer(GL_ARRAY_BUFFER,vbo0);
+    glBufferData(GL_ARRAY_BUFFER,d->popCount*sizeof(glm::vec4),NULL,GL_DYNAMIC_DRAW);
+    glm::vec4 * partPos = (glm::vec4*)glMapBuffer(GL_ARRAY_BUFFER,GL_WRITE_ONLY);
+    for(size_t i=0;i<d->popCount;i++){
+        float pa = (float)rand();
+        float pb = (float)rand();
+        float pr = float(rand())/float(RAND_MAX);
+        *(partPos+i) = glm::vec4(pr*std::cos(pb)*std::cos(pa),
+                                 pr*std::sin(pb),
+                                 pr*std::cos(pb)*std::sin(pa),
+                                 1.0f);
+    }
+    glUnmapBuffer(GL_ARRAY_BUFFER);
 
-    //pos
-    glBindBuffer(GL_ARRAY_BUFFER,vbo);
     glVertexAttribPointer(partPosLoc,4,GL_FLOAT,GL_FALSE,0,(const void*)0);
     glEnableVertexAttribArray(partPosLoc);
 
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK,xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,vbo1);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                 d->popCount*sizeof(glm::vec4),
+                 NULL,
+                 GL_DYNAMIC_DRAW);
+    glTransformFeedbackBufferBase(xfb,0,vbo1);
 
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER,0);
+
+
+    glBindVertexArray(vao1);
+//    //initial particles
+    glBindBuffer(GL_ARRAY_BUFFER,vbo1);
+    //glBufferData(GL_ARRAY_BUFFER,d->popCount*sizeof(glm::vec4),NULL,GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(partPosLoc,4,GL_FLOAT,GL_FALSE,0,(const void*)0);
+    glEnableVertexAttribArray(partPosLoc);
+
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK,xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,vbo0);
+//    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+//                 d->popCount*sizeof(glm::vec4),
+//                 NULL,
+//                 GL_DYNAMIC_DRAW);
+    glTransformFeedbackBufferBase(xfb,0,vbo0);
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER,0);
+
     glUseProgram(0);
 }
 
 void init(UserData *d)
 {
     //USer Data
+    d->frame = 0;
+    d->popCount = 2;
     d->autoRot = GLFW_FALSE;
     d->fov = 55.0f;
     d->eye = glm::vec4(0.0f, 0.0f, 3.2f, 1.0f);
@@ -371,9 +438,10 @@ void init(UserData *d)
     glGenVertexArrays(VAO_COUNT,d->vao);
     glGenBuffers(VBO_COUNT,d->vbo);
     glGenBuffers(EBO_COUNT,d->ebo);
+    glGenTransformFeedbacks(XFB_COUNT,d->xfb);
 
     initCubeRenderer(d);
-    initPartUpdater(d);
+    //initPartUpdater(d);
     initPartRenderer(d);
 
     glfwSetTime(0.0f);
@@ -417,19 +485,24 @@ void updatePart(UserData *d)
     *(partPos) = glm::vec4(0,-1,0,1);
     *(partPos+1) = glm::vec4(0,1,0,1);
     glUnmapBuffer(GL_ARRAY_BUFFER);
+    glBindBuffer(GL_ARRAY_BUFFER,0);
 
     glBindVertexArray(vao);
     glDrawArrays(GL_POINTS,0,2);
     glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER,0);
     glUseProgram(0);
 }
 
 void drawPart(UserData *d)
 {
     GLuint prg = d->prg[PRG_PARTICLE];
-    GLuint vao = d->vao[VAO_PARTICLE];
-    GLuint vbo = d->vbo[VBO_PARTICLE];
+    GLuint vao0 = d->vao[VAO_PARTICLE0];
+    GLuint vao1 = d->vao[VAO_PARTICLE1];
+    GLuint vbo0 = d->vbo[VBO_PARTICLE0];
+    GLuint vbo1 = d->vbo[VBO_PARTICLE1];
+    GLuint xfb = d->xfb[XFB_PARTICLE];
+    GLuint vao = (d->frame&0x1)? vao1 : vao0;
+    GLuint vbo = (d->frame&0x1)? vbo0 : vbo1;
 
     glUseProgram(prg);
 
@@ -440,18 +513,30 @@ void drawPart(UserData *d)
     glm::mat4 mvpMat = d->proj * d->view * d->model;
     glUniformMatrix4fv(mvpMatLoc,1,GL_FALSE,glm::value_ptr(mvpMat));
 
-    glBindBuffer(GL_ARRAY_BUFFER,vbo);
-    glBufferData(GL_ARRAY_BUFFER,2*sizeof(glm::vec4),NULL,GL_DYNAMIC_DRAW);
-    glm::vec4 * partPos = (glm::vec4*)glMapBuffer(GL_ARRAY_BUFFER,GL_WRITE_ONLY);
-    *(partPos) = glm::vec4(-1,0,0,1);
-    *(partPos+1) = glm::vec4(1,0,0,1);
-    glUnmapBuffer(GL_ARRAY_BUFFER);
-
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,vbo);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,d->popCount*sizeof(glm::vec4),NULL,GL_DYNAMIC_DRAW);
     glBindVertexArray(vao);
-    glDrawArrays(GL_POINTS,0,2);
+    glTransformFeedbackBufferBase(xfb,0,vbo);
+
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS,0,d->popCount);
+    glEndTransformFeedback();
+
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER,0);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,0);
     glUseProgram(0);
+
+//    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,vbo);
+//    glm::vec4 * partPos = (glm::vec4*)glMapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,GL_WRITE_ONLY);
+//    for(size_t i=0;i<d->popCount;i++){
+//        std::cout << *(partPos+i);
+//    }
+//    std::cout << std::endl;
+//    glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+    //glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,0);
+    //exit(0);
+
 }
 
 void display(UserData *d)
@@ -464,7 +549,7 @@ void display(UserData *d)
 
     if(d->autoRot){
         glm::mat4 rot = glm::rotate(glm::mat4(1.0f),
-                                    glm::radians(10.0f*dt),
+                                    glm::radians(5.0f*dt),
                                     glm::vec3(0.0f,1.0f,0.0f));
         d->eye = rot * d->eye;
         d->view = glm::lookAt(glm::vec3(d->eye),
@@ -472,7 +557,7 @@ void display(UserData *d)
                               glm::vec3(0.0f,1.0f,0.0f));
     }
     drawCube(d);
-    updatePart(d);
+    //updatePart(d);
     drawPart(d);
 }
 
@@ -483,6 +568,7 @@ void finalize(UserData *d)
     glDeleteVertexArrays(VAO_COUNT,d->vao);
     glDeleteBuffers(VBO_COUNT,d->vbo);
     glDeleteBuffers(EBO_COUNT,d->ebo);
+    glDeleteTransformFeedbacks(XFB_COUNT,d->xfb);
 
     glfwDestroyWindow(d->wnd);
     glfwTerminate();
@@ -495,6 +581,7 @@ int main()
     do{
         display(&d);
         glfwSwapBuffers(d.wnd);
+        //d.frame++;
         glfwPollEvents();
     }while(!glfwWindowShouldClose(d.wnd));
 
